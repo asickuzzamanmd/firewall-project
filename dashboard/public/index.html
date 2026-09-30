@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>CyberGuard IDS Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="/socket.io/socket.io.js"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 font-mono min-h-screen p-6">
+  <div class="max-w-7xl mx-auto space-y-6">
+
+    <!-- Top Navigation -->
+    <header class="flex justify-between items-center bg-slate-900 border border-slate-800 p-5 rounded-2xl shadow-xl">
+      <div>
+        <h1 class="text-2xl font-bold tracking-tight text-emerald-400 flex items-center gap-2">
+          <span>🛡️</span> CyberGuard IDS & Firewall
+        </h1>
+        <p class="text-xs text-slate-400 mt-1">Host-based Threat Mitigation & Live Packet Inspector</p>
+      </div>
+      <div class="flex items-center gap-4">
+        <div class="text-right">
+          <p class="text-xs text-slate-400">Total Packets</p>
+          <p id="packet-counter" class="text-lg font-bold text-cyan-400">0</p>
+        </div>
+        <div class="h-8 w-px bg-slate-800"></div>
+        <span class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+          <span class="h-2 w-2 rounded-full bg-emerald-400 animate-pulse"></span>
+          Engine Active
+        </span>
+      </div>
+    </header>
+
+    <!-- Metrics Cards -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl">
+        <p class="text-xs text-slate-400">Active iptables Drops</p>
+        <h3 id="block-counter" class="text-2xl font-bold text-rose-500 mt-1">0</h3>
+      </div>
+      <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl">
+        <p class="text-xs text-slate-400">DDoS Rate Threshold</p>
+        <h3 class="text-2xl font-bold text-amber-400 mt-1">25 pkts/sec</h3>
+      </div>
+      <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl">
+        <p class="text-xs text-slate-400">Scan Sensitivity</p>
+        <h3 class="text-2xl font-bold text-indigo-400 mt-1">>5 ports/3s</h3>
+      </div>
+    </div>
+
+    <!-- Main View: Stream & Threat Log -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      
+      <!-- Threat Mitigation Stream -->
+      <div class="bg-slate-900 border border-rose-950/40 p-5 rounded-2xl flex flex-col h-[520px]">
+        <div class="flex justify-between items-center mb-4 pb-3 border-b border-slate-800">
+          <h2 class="text-sm font-semibold text-rose-400 flex items-center gap-2">
+            <span>🚫</span> Blocked Threats (Auto-mitigated)
+          </h2>
+          <span class="text-xs text-slate-500">Live via iptables</span>
+        </div>
+        <div id="blocked-container" class="space-y-3 overflow-y-auto flex-1 pr-1 text-xs">
+          <!-- Dynamic Threat Cards -->
+        </div>
+      </div>
+
+      <!-- Live Packet Stream -->
+      <div class="bg-slate-900 border border-slate-800 p-5 rounded-2xl flex flex-col h-[520px]">
+        <div class="flex justify-between items-center mb-4 pb-3 border-b border-slate-800">
+          <h2 class="text-sm font-semibold text-cyan-400 flex items-center gap-2">
+            <span>📡</span> Inbound Network Traffic
+          </h2>
+          <span class="text-xs text-slate-500">Filtered L3/L4 Frames</span>
+        </div>
+        <div id="traffic-container" class="space-y-1.5 overflow-y-auto flex-1 pr-1 text-xs text-slate-400">
+          <!-- Live Packets -->
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <script>
+    const socket = io();
+    const packetCounter = document.getElementById('packet-counter');
+    const blockCounter = document.getElementById('block-counter');
+    const blockedContainer = document.getElementById('blocked-container');
+    const trafficContainer = document.getElementById('traffic-container');
+
+    let totalPackets = 0;
+    let blockedCount = 0;
+
+    socket.on('init-state', (data) => {
+      totalPackets = data.totalPackets;
+      packetCounter.innerText = totalPackets;
+      
+      blockedContainer.innerHTML = '';
+      data.blocked.forEach(addBlockCard);
+      blockedCount = data.blocked.length;
+      blockCounter.innerText = blockedCount;
+    });
+
+    socket.on('traffic-stream', (pkt) => {
+      totalPackets++;
+      packetCounter.innerText = totalPackets;
+
+      const row = document.createElement('div');
+      row.className = 'flex justify-between items-center p-2 rounded bg-slate-950/60 border border-slate-800/40 text-[11px]';
+      row.innerHTML = `
+        <span class="text-slate-300 font-medium">${pkt.src} &rarr; ${pkt.dst}</span>
+        <span class="text-slate-400">${pkt.proto} Port: <span class="text-indigo-400 font-bold">${pkt.port || 'N/A'}</span></span>
+        <span class="text-slate-500 text-[10px]">${pkt.timestamp}</span>
+      `;
+      trafficContainer.prepend(row);
+
+      if (trafficContainer.children.length > 50) {
+        trafficContainer.lastElementChild.remove();
+      }
+    });
+
+    socket.on('threat-blocked', (threat) => {
+      // যদি কার্ড আগে থেকে না থাকে
+      if (!document.getElementById(`card-${threat.ip.replace(/[^a-zA-Z0-9]/g, '_')}`)) {
+        addBlockCard(threat);
+        blockedCount++;
+        blockCounter.innerText = blockedCount;
+      }
+    });
+
+    socket.on('threat-unblocked', ({ ip }) => {
+      removeBlockCard(ip);
+    });
+
+    function addBlockCard(threat) {
+      const sanitizedId = `card-${threat.ip.replace(/[^a-zA-Z0-9]/g, '_')}`;
+      const card = document.createElement('div');
+      card.id = sanitizedId;
+      card.className = 'p-3 bg-rose-950/20 border border-rose-900/40 rounded-lg flex justify-between items-center gap-2 transition-all duration-300';
+      card.innerHTML = `
+        <div class="flex-1">
+          <div class="flex items-center gap-2">
+            <span class="text-rose-400 font-bold tracking-wide">${threat.ip}</span>
+            <span class="text-[10px] text-slate-500">${threat.timestamp}</span>
+          </div>
+          <p class="text-[11px] text-slate-300 mt-0.5">${threat.reason}</p>
+        </div>
+        <button onclick="requestUnblock('${threat.ip}', this)" 
+          class="px-2.5 py-1 text-[11px] font-medium bg-slate-800 hover:bg-emerald-600 hover:text-white text-slate-300 border border-slate-700 hover:border-emerald-500 rounded transition-colors duration-150">
+          Unblock
+        </button>
+      `;
+      blockedContainer.prepend(card);
+    }
+
+    function removeBlockCard(ip) {
+      const sanitizedId = `card-${ip.replace(/[^a-zA-Z0-9]/g, '_')}`;
+      const el = document.getElementById(sanitizedId);
+      if (el) {
+        el.style.opacity = '0';
+        el.style.transform = 'scale(0.95)';
+        setTimeout(() => {
+          el.remove();
+          blockedCount = Math.max(0, blockedCount - 1);
+          blockCounter.innerText = blockedCount;
+        }, 200);
+      }
+    }
+
+    async function requestUnblock(ip, btnElement) {
+      btnElement.innerText = "Reverting...";
+      btnElement.disabled = true;
+
+      try {
+        const response = await fetch('/api/unblock', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ip })
+        });
+        if (!response.ok) {
+          alert('Failed to unblock via engine.');
+          btnElement.innerText = "Unblock";
+          btnElement.disabled = false;
+        }
+      } catch (err) {
+        alert('Server unreachable');
+        btnElement.innerText = "Unblock";
+        btnElement.disabled = false;
+      }
+    }
+  </script>
+</body>
+</html>
